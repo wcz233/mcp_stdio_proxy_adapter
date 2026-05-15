@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20)
 
 project(mcp_stdio_proxy_adapter
     VERSION 0.1.0
@@ -8,6 +8,33 @@ project(mcp_stdio_proxy_adapter
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+
+option(MCP_PLATFORM_WINDOWS "Build mcp_stdio_proxy_adapter for Windows" OFF)
+option(MCP_PLATFORM_LINUX "Build mcp_stdio_proxy_adapter for Linux" OFF)
+
+if(MCP_PLATFORM_WINDOWS AND MCP_PLATFORM_LINUX)
+    message(FATAL_ERROR "Only one of MCP_PLATFORM_WINDOWS and MCP_PLATFORM_LINUX may be enabled")
+elseif(MCP_PLATFORM_WINDOWS)
+    set(MCP_PROXY_PLATFORM "windows")
+elseif(MCP_PLATFORM_LINUX)
+    set(MCP_PROXY_PLATFORM "linux")
+elseif(WIN32)
+    set(MCP_PROXY_PLATFORM "windows")
+elseif(UNIX AND NOT APPLE)
+    set(MCP_PROXY_PLATFORM "linux")
+else()
+    message(FATAL_ERROR "Unsupported target platform for mcp_stdio_proxy_adapter")
+endif()
+
+if(MCP_PROXY_PLATFORM STREQUAL "windows" AND NOT WIN32)
+    message(FATAL_ERROR "windows_defconfig.cmake requires a Windows target toolchain")
+endif()
+
+if(MCP_PROXY_PLATFORM STREQUAL "linux" AND NOT (UNIX AND NOT APPLE))
+    message(FATAL_ERROR "linux_defconfig.cmake requires a Linux target toolchain")
+endif()
+
+message(STATUS "mcp_stdio_proxy_adapter platform: ${MCP_PROXY_PLATFORM}")
 
 add_executable(mcp_stdio_proxy_adapter)
 
@@ -23,14 +50,17 @@ target_include_directories(mcp_stdio_proxy_adapter
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
+if(MCP_PROXY_PLATFORM STREQUAL "windows")
+    target_compile_definitions(mcp_stdio_proxy_adapter PRIVATE MCP_PLATFORM_WINDOWS=1)
+    target_link_libraries(mcp_stdio_proxy_adapter PRIVATE ws2_32)
+elseif(MCP_PROXY_PLATFORM STREQUAL "linux")
+    target_compile_definitions(mcp_stdio_proxy_adapter PRIVATE MCP_PLATFORM_LINUX=1 _POSIX_C_SOURCE=200809L)
+endif()
+
 target_compile_definitions(mcp_stdio_proxy_adapter
     PRIVATE
         MCP_PROXY_VERSION="${PROJECT_VERSION}"
 )
-
-if(WIN32)
-    target_link_libraries(mcp_stdio_proxy_adapter PRIVATE ws2_32)
-endif()
 
 if(MSVC)
     target_compile_definitions(mcp_stdio_proxy_adapter PRIVATE _CRT_SECURE_NO_WARNINGS)

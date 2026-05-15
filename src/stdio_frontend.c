@@ -1,3 +1,4 @@
+#include "mcp_proxy/platform.h"
 #include "mcp_proxy/stdio_frontend.h"
 
 #include <ctype.h>
@@ -6,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
 #include <fcntl.h>
 #include <io.h>
 #endif
@@ -202,7 +203,7 @@ int mcp_proxy_stdio_run(const struct mcp_backend_config *config)
     size_t cap = 0;
     int exit_code = 0;
 
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 #endif

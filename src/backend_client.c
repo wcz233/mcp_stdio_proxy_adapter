@@ -1,4 +1,5 @@
 #include "mcp_proxy/backend_client.h"
+#include "mcp_proxy/platform.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -7,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -27,7 +28,7 @@ struct mcp_backend_client {
     enum mcp_proxy_transport transport;
     unsigned int timeout_ms;
     char last_error[192];
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     HANDLE pipe;
     SOCKET socket_fd;
 #else
@@ -58,7 +59,7 @@ static void write_u32_be(unsigned char *data, uint32_t value)
 
 static unsigned long long now_ms(void)
 {
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     return (unsigned long long)GetTickCount64();
 #else
     struct timespec ts;
@@ -71,7 +72,7 @@ static unsigned long long now_ms(void)
 
 static void sleep_ms(unsigned int ms)
 {
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     Sleep(ms);
 #else
     struct timespec ts;
@@ -82,7 +83,7 @@ static void sleep_ms(unsigned int ms)
 #endif
 }
 
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
 static int read_exact(struct mcp_backend_client *client, void *buffer, size_t len)
 {
     unsigned char *cursor = buffer;
@@ -335,7 +336,7 @@ int mcp_backend_client_open(struct mcp_backend_client **out,
 {
     struct mcp_backend_client *client;
     int rc;
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     WSADATA wsa;
 #endif
 
@@ -349,7 +350,7 @@ int mcp_backend_client_open(struct mcp_backend_client **out,
 
     client->transport = config->transport;
     client->timeout_ms = config->timeout_ms ? config->timeout_ms : 3000;
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     client->pipe = INVALID_HANDLE_VALUE;
     client->socket_fd = INVALID_SOCKET;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -370,7 +371,7 @@ int mcp_backend_client_open(struct mcp_backend_client **out,
         rc = -1;
     }
 
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
 done:
 #endif
     if (rc != 0) {
@@ -387,7 +388,7 @@ void mcp_backend_client_close(struct mcp_backend_client *client)
     if (!client)
         return;
 
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     if (client->pipe != INVALID_HANDLE_VALUE)
         CloseHandle(client->pipe);
     if (client->socket_fd != INVALID_SOCKET)

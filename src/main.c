@@ -1,3 +1,4 @@
+#include "mcp_proxy/platform.h"
 #include "mcp_proxy/stdio_frontend.h"
 
 #include <stdio.h>
@@ -33,7 +34,7 @@ int main(int argc, char **argv)
     int i;
 
     memset(&config, 0, sizeof(config));
-#ifdef _WIN32
+#if defined(MCP_PLATFORM_WINDOWS)
     config.transport = MCP_PROXY_TRANSPORT_PIPE;
     config.endpoint = "\\\\.\\pipe\\mcp-server";
 #else
