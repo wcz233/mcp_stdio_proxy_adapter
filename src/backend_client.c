@@ -1,6 +1,13 @@
 #include "mcp_proxy/backend_client.h"
 #include "mcp_proxy/platform.h"
 
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
+#include <psa/crypto.h>
+
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
@@ -28,6 +35,12 @@ struct mcp_backend_client {
     enum mcp_proxy_transport transport;
     unsigned int timeout_ms;
     char last_error[192];
+    mbedtls_x509_crt ca;
+    mbedtls_x509_crt certificate;
+    mbedtls_pk_context private_key;
+    mbedtls_ssl_config tls_config;
+    mbedtls_ssl_context tls;
+    int tls_initialized;
 #if defined(MCP_PLATFORM_WINDOWS)
     HANDLE pipe;
     SOCKET socket_fd;
@@ -35,6 +48,121 @@ struct mcp_backend_client {
     int fd;
 #endif
 };
+
+static void set_error(struct mcp_backend_client *client, const char *message);
+
+static void set_tls_error(struct mcp_backend_client *client, const char *operation, int rc)
+{
+    char detail[112];
+
+    mbedtls_strerror(rc, detail, sizeof(detail));
+    snprintf(client->last_error,
+             sizeof(client->last_error),
+             "%s: %s (-0x%04x)",
+             operation,
+             detail,
+             (unsigned int)-rc);
+}
+
+static int tls_socket_send(void *ctx, const unsigned char *buffer, size_t len)
+{
+    struct mcp_backend_client *client = ctx;
+#if defined(MCP_PLATFORM_WINDOWS)
+    int chunk = len > INT_MAX ? INT_MAX : (int)len;
+    int rc = send(client->socket_fd, (const char *)buffer, chunk, 0);
+#else
+    ssize_t rc = send(client->fd, buffer, len, 0);
+#endif
+
+    return rc > 0 ? (int)rc : MBEDTLS_ERR_NET_SEND_FAILED;
+}
+
+static int tls_socket_recv(void *ctx, unsigned char *buffer, size_t len)
+{
+    struct mcp_backend_client *client = ctx;
+#if defined(MCP_PLATFORM_WINDOWS)
+    int chunk = len > INT_MAX ? INT_MAX : (int)len;
+    int rc = recv(client->socket_fd, (char *)buffer, chunk, 0);
+#else
+    ssize_t rc = recv(client->fd, buffer, len, 0);
+#endif
+
+    return rc > 0 ? (int)rc : MBEDTLS_ERR_NET_RECV_FAILED;
+}
+
+static int start_tls(struct mcp_backend_client *client, const struct mcp_backend_config *config)
+{
+    const char *server_name = config->tls_server_name ? config->tls_server_name : config->host;
+    int rc;
+
+    if (!config->tls_ca_file || !config->tls_cert_file || !config->tls_key_file) {
+        set_error(client, "TCP backend requires CA, certificate, and private key files");
+        return -1;
+    }
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        set_error(client, "psa_crypto_init failed");
+        return -1;
+    }
+
+    mbedtls_x509_crt_init(&client->ca);
+    mbedtls_x509_crt_init(&client->certificate);
+    mbedtls_pk_init(&client->private_key);
+    mbedtls_ssl_config_init(&client->tls_config);
+    mbedtls_ssl_init(&client->tls);
+    client->tls_initialized = 1;
+
+    rc = mbedtls_x509_crt_parse_file(&client->ca, config->tls_ca_file);
+    if (rc < 0) {
+        set_tls_error(client, "load CA certificate", rc);
+        return -1;
+    }
+    rc = mbedtls_x509_crt_parse_file(&client->certificate, config->tls_cert_file);
+    if (rc < 0) {
+        set_tls_error(client, "load client certificate", rc);
+        return -1;
+    }
+    rc = mbedtls_pk_parse_keyfile(&client->private_key, config->tls_key_file, NULL);
+    if (rc != 0) {
+        set_tls_error(client, "load client private key", rc);
+        return -1;
+    }
+    rc = mbedtls_ssl_config_defaults(&client->tls_config,
+                                     MBEDTLS_SSL_IS_CLIENT,
+                                     MBEDTLS_SSL_TRANSPORT_STREAM,
+                                     MBEDTLS_SSL_PRESET_DEFAULT);
+    if (rc != 0) {
+        set_tls_error(client, "configure TLS client", rc);
+        return -1;
+    }
+    mbedtls_ssl_conf_authmode(&client->tls_config, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&client->tls_config, &client->ca, NULL);
+    mbedtls_ssl_conf_min_tls_version(&client->tls_config, MBEDTLS_SSL_VERSION_TLS1_3);
+    mbedtls_ssl_conf_max_tls_version(&client->tls_config, MBEDTLS_SSL_VERSION_TLS1_3);
+    mbedtls_ssl_conf_tls13_key_exchange_modes(
+        &client->tls_config,
+        MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
+    mbedtls_ssl_conf_session_tickets(&client->tls_config,
+                                     MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
+    rc = mbedtls_ssl_conf_own_cert(&client->tls_config,
+                                   &client->certificate,
+                                   &client->private_key);
+    if (rc != 0 || (rc = mbedtls_ssl_setup(&client->tls, &client->tls_config)) != 0 ||
+        (rc = mbedtls_ssl_set_hostname(&client->tls, server_name)) != 0) {
+        set_tls_error(client, "initialize TLS client", rc);
+        return -1;
+    }
+    mbedtls_ssl_set_bio(&client->tls, client, tls_socket_send, tls_socket_recv, NULL);
+    do {
+        rc = mbedtls_ssl_handshake(&client->tls);
+    } while (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE);
+    if (rc != 0 || mbedtls_ssl_get_verify_result(&client->tls) != 0) {
+        set_tls_error(client,
+                      "TLS handshake failed",
+                      rc != 0 ? rc : MBEDTLS_ERR_SSL_BAD_CERTIFICATE);
+        return -1;
+    }
+    return 0;
+}
 
 static void set_error(struct mcp_backend_client *client, const char *message)
 {
@@ -100,8 +228,7 @@ static int read_exact(struct mcp_backend_client *client, void *buffer, size_t le
             cursor += read_count;
             len -= read_count;
         } else {
-            int chunk = len > INT_MAX ? INT_MAX : (int)len;
-            int rc = recv(client->socket_fd, (char *)cursor, chunk, 0);
+            int rc = mbedtls_ssl_read(&client->tls, cursor, len);
 
             if (rc <= 0) {
                 set_error(client, "backend read failed");
@@ -131,8 +258,7 @@ static int write_exact(struct mcp_backend_client *client, const void *buffer, si
             cursor += written;
             len -= written;
         } else {
-            int chunk = len > INT_MAX ? INT_MAX : (int)len;
-            int rc = send(client->socket_fd, (const char *)cursor, chunk, 0);
+            int rc = mbedtls_ssl_write(&client->tls, cursor, len);
 
             if (rc <= 0) {
                 set_error(client, "backend write failed");
@@ -221,7 +347,9 @@ static int read_exact(struct mcp_backend_client *client, void *buffer, size_t le
     unsigned char *cursor = buffer;
 
     while (len > 0) {
-        ssize_t rc = read(client->fd, cursor, len);
+        int rc = client->transport == MCP_PROXY_TRANSPORT_TCP
+                     ? mbedtls_ssl_read(&client->tls, cursor, len)
+                     : (int)read(client->fd, cursor, len);
 
         if (rc <= 0) {
             set_error(client, "backend read failed");
@@ -239,7 +367,9 @@ static int write_exact(struct mcp_backend_client *client, const void *buffer, si
     const unsigned char *cursor = buffer;
 
     while (len > 0) {
-        ssize_t rc = write(client->fd, cursor, len);
+        int rc = client->transport == MCP_PROXY_TRANSPORT_TCP
+                     ? mbedtls_ssl_write(&client->tls, cursor, len)
+                     : (int)write(client->fd, cursor, len);
 
         if (rc <= 0) {
             set_error(client, "backend write failed");
@@ -366,6 +496,8 @@ int mcp_backend_client_open(struct mcp_backend_client **out,
         rc = open_pipe(client, config->endpoint);
     } else if (config->transport == MCP_PROXY_TRANSPORT_TCP) {
         rc = open_tcp(client, config->host, config->port);
+        if (rc == 0)
+            rc = start_tls(client, config);
     } else {
         set_error(client, "unsupported backend transport");
         rc = -1;
@@ -398,6 +530,13 @@ void mcp_backend_client_close(struct mcp_backend_client *client)
     if (client->fd >= 0)
         close(client->fd);
 #endif
+    if (client->tls_initialized) {
+        mbedtls_ssl_free(&client->tls);
+        mbedtls_ssl_config_free(&client->tls_config);
+        mbedtls_pk_free(&client->private_key);
+        mbedtls_x509_crt_free(&client->certificate);
+        mbedtls_x509_crt_free(&client->ca);
+    }
     free(client);
 }
 

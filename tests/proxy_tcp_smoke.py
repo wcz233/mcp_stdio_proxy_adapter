@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
 def send(proc, payload):
@@ -20,12 +21,16 @@ def main():
     adapter = sys.argv[1]
     server = sys.argv[2]
     port = int(sys.argv[3])
+    tls_dir = Path(sys.argv[4])
 
     env = os.environ.copy()
     env["MCP_ENABLE_STDIO"] = "0"
     env["MCP_ENABLE_TCP"] = "1"
     env["MCP_TCP_HOST"] = "127.0.0.1"
     env["MCP_TCP_PORT"] = str(port)
+    env["MCP_TLS_CA_FILE"] = str(tls_dir / "ca.cert.pem")
+    env["MCP_TLS_CERT_FILE"] = str(tls_dir / "node-a.cert.pem")
+    env["MCP_TLS_KEY_FILE"] = str(tls_dir / "node-a.key.pem")
     server_proc = subprocess.Popen(
         [server],
         stdin=subprocess.DEVNULL,
@@ -39,7 +44,23 @@ def main():
     adapter_proc = None
     try:
         adapter_proc = subprocess.Popen(
-            [adapter, "--transport", "tcp", "--host", "127.0.0.1", "--port", str(port)],
+            [
+                adapter,
+                "--transport",
+                "tcp",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--tls-ca",
+                str(tls_dir / "ca.cert.pem"),
+                "--tls-cert",
+                str(tls_dir / "adapter.cert.pem"),
+                "--tls-key",
+                str(tls_dir / "adapter.key.pem"),
+                "--tls-server-name",
+                "localhost",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

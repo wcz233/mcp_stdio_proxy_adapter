@@ -9,7 +9,8 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "Usage: %s --transport named-pipe|unix-socket|tcp "
-            "[--endpoint PATH] [--host HOST] [--port PORT] [--timeout-ms MS]\n",
+            "[--endpoint PATH] [--host HOST] [--port PORT] [--timeout-ms MS] "
+            "[--tls-ca FILE --tls-cert FILE --tls-key FILE [--tls-server-name NAME]]\n",
             argv0);
 }
 
@@ -65,6 +66,14 @@ int main(int argc, char **argv)
             config.port = parse_uint(argv[++i], config.port);
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
             config.timeout_ms = parse_uint(argv[++i], config.timeout_ms);
+        } else if (strcmp(argv[i], "--tls-ca") == 0 && i + 1 < argc) {
+            config.tls_ca_file = argv[++i];
+        } else if (strcmp(argv[i], "--tls-cert") == 0 && i + 1 < argc) {
+            config.tls_cert_file = argv[++i];
+        } else if (strcmp(argv[i], "--tls-key") == 0 && i + 1 < argc) {
+            config.tls_key_file = argv[++i];
+        } else if (strcmp(argv[i], "--tls-server-name") == 0 && i + 1 < argc) {
+            config.tls_server_name = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -72,6 +81,12 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 2;
         }
+    }
+
+    if (config.transport == MCP_PROXY_TRANSPORT_TCP &&
+        (!config.tls_ca_file || !config.tls_cert_file || !config.tls_key_file)) {
+        fprintf(stderr, "TCP transport requires --tls-ca, --tls-cert, and --tls-key\n");
+        return 2;
     }
 
     return mcp_proxy_stdio_run(&config);

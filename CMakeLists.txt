@@ -38,6 +38,10 @@ message(STATUS "mcp_stdio_proxy_adapter platform: ${MCP_PROXY_PLATFORM}")
 
 add_executable(mcp_stdio_proxy_adapter)
 
+if(NOT TARGET MCP::mbedtls)
+    find_package(MbedTLS CONFIG REQUIRED)
+endif()
+
 target_sources(mcp_stdio_proxy_adapter
     PRIVATE
         src/backend_client.c
@@ -49,6 +53,12 @@ target_include_directories(mcp_stdio_proxy_adapter
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
+
+if(TARGET MCP::mbedtls)
+    target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MCP::mbedtls)
+else()
+    target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MbedTLS::mbedtls)
+endif()
 
 if(MCP_PROXY_PLATFORM STREQUAL "windows")
     target_compile_definitions(mcp_stdio_proxy_adapter PRIVATE MCP_PLATFORM_WINDOWS=1)

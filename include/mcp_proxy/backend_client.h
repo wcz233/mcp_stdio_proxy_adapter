@@ -14,6 +14,10 @@ struct mcp_backend_config {
     const char *host;
     unsigned int port;
     unsigned int timeout_ms;
+    const char *tls_ca_file;
+    const char *tls_cert_file;
+    const char *tls_key_file;
+    const char *tls_server_name;
 };
 
 struct mcp_backend_client;
