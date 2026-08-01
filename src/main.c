@@ -1,5 +1,8 @@
 #include "mcp_proxy/platform.h"
 #include "mcp_proxy/stdio_frontend.h"
+#if MCP_TCP_SECURITY_MTLS
+#include "mcp_proxy/network_security_config.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,8 +13,66 @@ static void usage(const char *argv0)
     fprintf(stderr,
             "Usage: %s --transport named-pipe|unix-socket|tcp "
             "[--endpoint PATH] [--host HOST] [--port PORT] [--timeout-ms MS] "
-            "[--tls-ca FILE --tls-cert FILE --tls-key FILE [--tls-server-name NAME]]\n",
+            "[--network-security-config FILE]\n",
             argv0);
+}
+
+static int configure_tcp_security(struct mcp_backend_config *config,
+                                  const char *security_path,
+#if MCP_TCP_SECURITY_MTLS
+                                  struct mcp_proxy_network_security_config **security)
+#else
+                                  void **security)
+#endif
+{
+    const char *requested = getenv("MCP_TCP_SECURITY");
+    bool requested_set = requested && requested[0] != '\0';
+
+    *security = NULL;
+    if (requested_set && strcmp(requested, "plaintext") != 0 && strcmp(requested, "mtls") != 0) {
+        fputs("MCP_TCP_SECURITY must be plaintext or mtls\n", stderr);
+        return -1;
+    }
+#if MCP_TCP_SECURITY_MTLS
+    {
+        bool requested_mtls = requested_set && strcmp(requested, "mtls") == 0;
+        bool config_mtls;
+        int rc = mcp_proxy_network_security_config_create(
+            security,
+            security_path,
+            !requested_set || requested_mtls);
+
+        if (rc != 0)
+            return -1;
+        config_mtls = mcp_proxy_network_security_config_enabled(*security);
+        if (requested_set && *security && requested_mtls != config_mtls) {
+            fputs("MCP_TCP_SECURITY conflicts with network_security.json enabled\n", stderr);
+            return -1;
+        }
+        if (!requested_set && !*security) {
+            fputs("network_security.json is required when MCP_TCP_SECURITY is unset\n", stderr);
+            return -1;
+        }
+        config->tcp_mtls_enabled = *security && config_mtls;
+        config->tls_ca_file = mcp_proxy_network_security_config_ca_file(*security);
+        config->tls_cert_file = mcp_proxy_network_security_config_certificate_file(*security);
+        config->tls_key_file = mcp_proxy_network_security_config_private_key_file(*security);
+        config->tls_server_name = mcp_proxy_network_security_config_server_name(*security);
+        fprintf(stderr,
+                "TCP security mode: %s\n",
+                config->tcp_mtls_enabled ? "mtls" : "plaintext");
+        return 0;
+    }
+#else
+    (void)config;
+    (void)security_path;
+    if (requested_set && strcmp(requested, "mtls") == 0) {
+        fputs("MCP_TCP_SECURITY=mtls is unavailable in a plaintext build\n", stderr);
+        return -1;
+    }
+    fputs("TCP security mode: plaintext\n", stderr);
+    return 0;
+#endif
 }
 
 static unsigned int parse_uint(const char *text, unsigned int default_value)
@@ -32,6 +93,13 @@ static unsigned int parse_uint(const char *text, unsigned int default_value)
 int main(int argc, char **argv)
 {
     struct mcp_backend_config config;
+    const char *security_path = NULL;
+#if MCP_TCP_SECURITY_MTLS
+    struct mcp_proxy_network_security_config *security = NULL;
+#else
+    void *security = NULL;
+#endif
+    int rc;
     int i;
 
     memset(&config, 0, sizeof(config));
@@ -66,14 +134,8 @@ int main(int argc, char **argv)
             config.port = parse_uint(argv[++i], config.port);
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
             config.timeout_ms = parse_uint(argv[++i], config.timeout_ms);
-        } else if (strcmp(argv[i], "--tls-ca") == 0 && i + 1 < argc) {
-            config.tls_ca_file = argv[++i];
-        } else if (strcmp(argv[i], "--tls-cert") == 0 && i + 1 < argc) {
-            config.tls_cert_file = argv[++i];
-        } else if (strcmp(argv[i], "--tls-key") == 0 && i + 1 < argc) {
-            config.tls_key_file = argv[++i];
-        } else if (strcmp(argv[i], "--tls-server-name") == 0 && i + 1 < argc) {
-            config.tls_server_name = argv[++i];
+        } else if (strcmp(argv[i], "--network-security-config") == 0 && i + 1 < argc) {
+            security_path = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -84,10 +146,16 @@ int main(int argc, char **argv)
     }
 
     if (config.transport == MCP_PROXY_TRANSPORT_TCP &&
-        (!config.tls_ca_file || !config.tls_cert_file || !config.tls_key_file)) {
-        fprintf(stderr, "TCP transport requires --tls-ca, --tls-cert, and --tls-key\n");
+        configure_tcp_security(&config, security_path, &security) != 0) {
+#if MCP_TCP_SECURITY_MTLS
+        mcp_proxy_network_security_config_destroy(security);
+#endif
         return 2;
     }
 
-    return mcp_proxy_stdio_run(&config);
+    rc = mcp_proxy_stdio_run(&config);
+#if MCP_TCP_SECURITY_MTLS
+    mcp_proxy_network_security_config_destroy(security);
+#endif
+    return rc;
 }

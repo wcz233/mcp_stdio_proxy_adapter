@@ -1,12 +1,14 @@
 #include "mcp_proxy/backend_client.h"
 #include "mcp_proxy/platform.h"
 
+#if MCP_TCP_SECURITY_MTLS
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
+#endif
 
 #include <errno.h>
 #include <limits.h>
@@ -35,12 +37,15 @@ struct mcp_backend_client {
     enum mcp_proxy_transport transport;
     unsigned int timeout_ms;
     char last_error[192];
+#if MCP_TCP_SECURITY_MTLS
     mbedtls_x509_crt ca;
     mbedtls_x509_crt certificate;
     mbedtls_pk_context private_key;
     mbedtls_ssl_config tls_config;
     mbedtls_ssl_context tls;
     int tls_initialized;
+#endif
+    bool tcp_mtls_enabled;
 #if defined(MCP_PLATFORM_WINDOWS)
     HANDLE pipe;
     SOCKET socket_fd;
@@ -51,6 +56,7 @@ struct mcp_backend_client {
 
 static void set_error(struct mcp_backend_client *client, const char *message);
 
+#if MCP_TCP_SECURITY_MTLS
 static void set_tls_error(struct mcp_backend_client *client, const char *operation, int rc)
 {
     char detail[112];
@@ -92,7 +98,9 @@ static int tls_socket_recv(void *ctx, unsigned char *buffer, size_t len)
 
 static int start_tls(struct mcp_backend_client *client, const struct mcp_backend_config *config)
 {
-    const char *server_name = config->tls_server_name ? config->tls_server_name : config->host;
+    const char *server_name = config->tls_server_name && config->tls_server_name[0] != '\0'
+                                  ? config->tls_server_name
+                                  : config->host;
     int rc;
 
     if (!config->tls_ca_file || !config->tls_cert_file || !config->tls_key_file) {
@@ -163,6 +171,41 @@ static int start_tls(struct mcp_backend_client *client, const struct mcp_backend
     }
     return 0;
 }
+#endif
+
+static int tcp_read(struct mcp_backend_client *client, unsigned char *buffer, size_t len)
+{
+#if MCP_TCP_SECURITY_MTLS
+    if (client->tcp_mtls_enabled)
+        return mbedtls_ssl_read(&client->tls, buffer, len);
+#endif
+#if defined(MCP_PLATFORM_WINDOWS)
+    {
+        int chunk = len > INT_MAX ? INT_MAX : (int)len;
+        return recv(client->socket_fd, (char *)buffer, chunk, 0);
+    }
+#else
+    return (int)read(client->fd, buffer, len);
+#endif
+}
+
+static int tcp_write(struct mcp_backend_client *client,
+                     const unsigned char *buffer,
+                     size_t len)
+{
+#if MCP_TCP_SECURITY_MTLS
+    if (client->tcp_mtls_enabled)
+        return mbedtls_ssl_write(&client->tls, buffer, len);
+#endif
+#if defined(MCP_PLATFORM_WINDOWS)
+    {
+        int chunk = len > INT_MAX ? INT_MAX : (int)len;
+        return send(client->socket_fd, (const char *)buffer, chunk, 0);
+    }
+#else
+    return (int)write(client->fd, buffer, len);
+#endif
+}
 
 static void set_error(struct mcp_backend_client *client, const char *message)
 {
@@ -228,7 +271,7 @@ static int read_exact(struct mcp_backend_client *client, void *buffer, size_t le
             cursor += read_count;
             len -= read_count;
         } else {
-            int rc = mbedtls_ssl_read(&client->tls, cursor, len);
+            int rc = tcp_read(client, cursor, len);
 
             if (rc <= 0) {
                 set_error(client, "backend read failed");
@@ -258,7 +301,7 @@ static int write_exact(struct mcp_backend_client *client, const void *buffer, si
             cursor += written;
             len -= written;
         } else {
-            int rc = mbedtls_ssl_write(&client->tls, cursor, len);
+            int rc = tcp_write(client, cursor, len);
 
             if (rc <= 0) {
                 set_error(client, "backend write failed");
@@ -348,7 +391,7 @@ static int read_exact(struct mcp_backend_client *client, void *buffer, size_t le
 
     while (len > 0) {
         int rc = client->transport == MCP_PROXY_TRANSPORT_TCP
-                     ? mbedtls_ssl_read(&client->tls, cursor, len)
+                     ? tcp_read(client, cursor, len)
                      : (int)read(client->fd, cursor, len);
 
         if (rc <= 0) {
@@ -368,7 +411,7 @@ static int write_exact(struct mcp_backend_client *client, const void *buffer, si
 
     while (len > 0) {
         int rc = client->transport == MCP_PROXY_TRANSPORT_TCP
-                     ? mbedtls_ssl_write(&client->tls, cursor, len)
+                     ? tcp_write(client, cursor, len)
                      : (int)write(client->fd, cursor, len);
 
         if (rc <= 0) {
@@ -480,6 +523,14 @@ int mcp_backend_client_open(struct mcp_backend_client **out,
 
     client->transport = config->transport;
     client->timeout_ms = config->timeout_ms ? config->timeout_ms : 3000;
+    client->tcp_mtls_enabled = config->tcp_mtls_enabled;
+#if !MCP_TCP_SECURITY_MTLS
+    if (client->tcp_mtls_enabled) {
+        set_error(client, "mtls TCP security was not compiled");
+        *out = client;
+        return -1;
+    }
+#endif
 #if defined(MCP_PLATFORM_WINDOWS)
     client->pipe = INVALID_HANDLE_VALUE;
     client->socket_fd = INVALID_SOCKET;
@@ -496,8 +547,10 @@ int mcp_backend_client_open(struct mcp_backend_client **out,
         rc = open_pipe(client, config->endpoint);
     } else if (config->transport == MCP_PROXY_TRANSPORT_TCP) {
         rc = open_tcp(client, config->host, config->port);
+#if MCP_TCP_SECURITY_MTLS
         if (rc == 0)
-            rc = start_tls(client, config);
+            rc = client->tcp_mtls_enabled ? start_tls(client, config) : 0;
+#endif
     } else {
         set_error(client, "unsupported backend transport");
         rc = -1;
@@ -530,6 +583,7 @@ void mcp_backend_client_close(struct mcp_backend_client *client)
     if (client->fd >= 0)
         close(client->fd);
 #endif
+#if MCP_TCP_SECURITY_MTLS
     if (client->tls_initialized) {
         mbedtls_ssl_free(&client->tls);
         mbedtls_ssl_config_free(&client->tls_config);
@@ -537,6 +591,7 @@ void mcp_backend_client_close(struct mcp_backend_client *client)
         mbedtls_x509_crt_free(&client->certificate);
         mbedtls_x509_crt_free(&client->ca);
     }
+#endif
     free(client);
 }
 

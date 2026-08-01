@@ -9,6 +9,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+set(MCP_TCP_SECURITY "mtls" CACHE STRING "TCP security: mtls or plaintext")
+set_property(CACHE MCP_TCP_SECURITY PROPERTY STRINGS mtls plaintext)
+if(NOT (MCP_TCP_SECURITY STREQUAL "mtls" OR MCP_TCP_SECURITY STREQUAL "plaintext"))
+    message(FATAL_ERROR
+        "MCP_TCP_SECURITY must be mtls or plaintext, got: ${MCP_TCP_SECURITY}")
+endif()
+
 option(MCP_PLATFORM_WINDOWS "Build mcp_stdio_proxy_adapter for Windows" OFF)
 option(MCP_PLATFORM_LINUX "Build mcp_stdio_proxy_adapter for Linux" OFF)
 
@@ -38,10 +45,6 @@ message(STATUS "mcp_stdio_proxy_adapter platform: ${MCP_PROXY_PLATFORM}")
 
 add_executable(mcp_stdio_proxy_adapter)
 
-if(NOT TARGET MCP::mbedtls)
-    find_package(MbedTLS CONFIG REQUIRED)
-endif()
-
 target_sources(mcp_stdio_proxy_adapter
     PRIVATE
         src/backend_client.c
@@ -54,10 +57,42 @@ target_include_directories(mcp_stdio_proxy_adapter
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
-if(TARGET MCP::mbedtls)
-    target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MCP::mbedtls)
+if(MCP_TCP_SECURITY STREQUAL "mtls")
+    if(NOT TARGET MCP::mbedtls)
+        find_package(MbedTLS CONFIG REQUIRED)
+    endif()
+    if(NOT TARGET MCP::jansson)
+        find_package(jansson CONFIG REQUIRED)
+    endif()
+
+    target_sources(mcp_stdio_proxy_adapter PRIVATE src/network_security_config.c)
+    if(TARGET MCP::mbedtls)
+        target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MCP::mbedtls)
+    else()
+        target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MbedTLS::mbedtls)
+    endif()
+    if(TARGET MCP::jansson)
+        target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MCP::jansson)
+    elseif(TARGET jansson::jansson)
+        target_link_libraries(mcp_stdio_proxy_adapter PRIVATE jansson::jansson)
+    elseif(TARGET jansson)
+        target_link_libraries(mcp_stdio_proxy_adapter PRIVATE jansson)
+    else()
+        message(FATAL_ERROR "Jansson target not found")
+    endif()
+
+    set(_mcp_proxy_security_default "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../config/network/network_security.json")
+        set(_mcp_proxy_security_default
+            "${CMAKE_CURRENT_SOURCE_DIR}/../config/network/network_security.json")
+    endif()
+    target_compile_definitions(mcp_stdio_proxy_adapter
+        PRIVATE
+            MCP_TCP_SECURITY_MTLS=1
+            MCP_NETWORK_SECURITY_DEFAULT_CONFIG="${_mcp_proxy_security_default}"
+    )
 else()
-    target_link_libraries(mcp_stdio_proxy_adapter PRIVATE MbedTLS::mbedtls)
+    target_compile_definitions(mcp_stdio_proxy_adapter PRIVATE MCP_TCP_SECURITY_MTLS=0)
 endif()
 
 if(MCP_PROXY_PLATFORM STREQUAL "windows")

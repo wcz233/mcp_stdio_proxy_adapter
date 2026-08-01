@@ -1,6 +1,7 @@
 #ifndef MCP_PROXY_BACKEND_CLIENT_H
 #define MCP_PROXY_BACKEND_CLIENT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 enum mcp_proxy_transport {
@@ -14,6 +15,7 @@ struct mcp_backend_config {
     const char *host;
     unsigned int port;
     unsigned int timeout_ms;
+    bool tcp_mtls_enabled;
     const char *tls_ca_file;
     const char *tls_cert_file;
     const char *tls_key_file;

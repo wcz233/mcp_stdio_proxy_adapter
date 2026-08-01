@@ -17,20 +17,61 @@ def recv(proc):
     return json.loads(line)
 
 
+def write_security_config(path, tls_dir, identity=None, server_name=""):
+    enabled = identity is not None
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "enabled": enabled,
+                "mtls": {
+                    "ca_file": str(tls_dir / "ca.cert.pem") if enabled else "",
+                    "certificate_file": str(tls_dir / f"{identity}.cert.pem") if enabled else "",
+                    "private_key_file": str(tls_dir / f"{identity}.key.pem") if enabled else "",
+                    "server_name": server_name,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def main():
     adapter = sys.argv[1]
     server = sys.argv[2]
     port = int(sys.argv[3])
-    tls_dir = Path(sys.argv[4])
+    security_mode = sys.argv[4]
+    tls_dir = Path(sys.argv[5])
 
     env = os.environ.copy()
     env["MCP_ENABLE_STDIO"] = "0"
     env["MCP_ENABLE_TCP"] = "1"
     env["MCP_TCP_HOST"] = "127.0.0.1"
     env["MCP_TCP_PORT"] = str(port)
-    env["MCP_TLS_CA_FILE"] = str(tls_dir / "ca.cert.pem")
-    env["MCP_TLS_CERT_FILE"] = str(tls_dir / "node-a.cert.pem")
-    env["MCP_TLS_KEY_FILE"] = str(tls_dir / "node-a.key.pem")
+    env["MCP_TCP_SECURITY"] = security_mode
+    adapter_env = os.environ.copy()
+    adapter_env["MCP_TCP_SECURITY"] = security_mode
+    adapter_args = [
+        adapter,
+        "--transport",
+        "tcp",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if security_mode == "mtls":
+        server_security = tls_dir / "server_network_security.json"
+        adapter_security = tls_dir / "adapter_network_security.json"
+        write_security_config(server_security, tls_dir, "node-a")
+        write_security_config(adapter_security, tls_dir, "adapter", "localhost")
+        env["MCP_NETWORK_SECURITY_CONFIG"] = str(server_security)
+        adapter_args.extend(["--network-security-config", str(adapter_security)])
+    else:
+        plaintext_security = tls_dir / "plaintext_network_security.json"
+        write_security_config(plaintext_security, tls_dir)
+        env["MCP_NETWORK_SECURITY_CONFIG"] = str(plaintext_security)
+        adapter_args.extend(["--network-security-config", str(plaintext_security)])
     server_proc = subprocess.Popen(
         [server],
         stdin=subprocess.DEVNULL,
@@ -44,28 +85,13 @@ def main():
     adapter_proc = None
     try:
         adapter_proc = subprocess.Popen(
-            [
-                adapter,
-                "--transport",
-                "tcp",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--tls-ca",
-                str(tls_dir / "ca.cert.pem"),
-                "--tls-cert",
-                str(tls_dir / "adapter.cert.pem"),
-                "--tls-key",
-                str(tls_dir / "adapter.key.pem"),
-                "--tls-server-name",
-                "localhost",
-            ],
+            adapter_args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            env=adapter_env,
         )
 
         send(
