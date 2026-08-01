@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.18)
 
 project(mcp_stdio_proxy_adapter
     VERSION 0.1.0
